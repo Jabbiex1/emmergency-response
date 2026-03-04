@@ -1,4 +1,5 @@
 const db = require('../db');
+const { getFirstAidGuidance, getSeverityScore } = require('../services/aiService');
 
 // CREATE INCIDENT
 const createIncident = async (req, res) => {
@@ -6,6 +7,12 @@ const createIncident = async (req, res) => {
   const user_id = req.user.id;
 
   try {
+    // Get AI first aid guidance and severity simultaneously
+    const [firstAid, severity] = await Promise.all([
+      getFirstAidGuidance(emergency_type, description),
+      getSeverityScore(emergency_type, description)
+    ]);
+
     // Create the incident
     const incident = await db.query(
       `INSERT INTO incidents (user_id, emergency_type, description, latitude, longitude, status)
@@ -24,11 +31,15 @@ const createIncident = async (req, res) => {
       [latitude, longitude]
     );
 
+    const responseData = {
+      first_aid_guidance: firstAid,
+      severity: severity
+    };
+
     if (responder.rows.length === 0) {
-      return res.status(201).json({
-        message: 'Incident created but no responders available right now',
-        incident: incident.rows[0]
-      });
+      responseData.message = 'Incident created but no responders available right now';
+      responseData.incident = incident.rows[0];
+      return res.status(201).json(responseData);
     }
 
     const assignedResponder = responder.rows[0];
@@ -46,16 +57,16 @@ const createIncident = async (req, res) => {
       [assignedResponder.id]
     );
 
-    res.status(201).json({
-      message: 'Incident created and responder assigned',
-      incident: updatedIncident.rows[0],
-      responder: {
-        id: assignedResponder.id,
-        full_name: assignedResponder.full_name,
-        phone: assignedResponder.phone,
-        responder_type: assignedResponder.responder_type
-      }
-    });
+    responseData.message = 'Incident created and responder assigned';
+    responseData.incident = updatedIncident.rows[0];
+    responseData.responder = {
+      id: assignedResponder.id,
+      full_name: assignedResponder.full_name,
+      phone: assignedResponder.phone,
+      responder_type: assignedResponder.responder_type
+    };
+
+    res.status(201).json(responseData);
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
