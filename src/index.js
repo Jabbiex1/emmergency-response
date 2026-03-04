@@ -49,6 +49,11 @@ io.on('connection', (socket) => {
     socket.join(incidentId);
     console.log(`User joined incident room: ${incidentId}`);
   });
+  // Responder joins their personal room
+socket.on('join_responder', (userId) => {
+  socket.join(`responder_${userId}`);
+  console.log(`Responder joined personal room: responder_${userId}`);
+});
 
   socket.on('update_location', (data) => {
     const { incidentId, latitude, longitude } = data;

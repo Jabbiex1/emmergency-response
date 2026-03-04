@@ -20,31 +20,33 @@ const createIncident = async (req, res) => {
       [user_id, emergency_type, description, latitude, longitude]
     );
 
-    // Find nearest available responder
+    // Find nearest available specialized responder
     const responder = await db.query(
-      `SELECT r.*, u.full_name, u.phone FROM responders r
+      `SELECT r.*, u.full_name, u.phone, u.id as user_id FROM responders r
        JOIN users u ON r.user_id = u.id
-       WHERE r.is_available = true AND r.is_verified = true
+       WHERE r.is_available = true
+       AND r.is_verified = true
+       AND r.specialization = $3
        ORDER BY (
          (r.latitude - $1)^2 + (r.longitude - $2)^2
        ) ASC LIMIT 1`,
-      [latitude, longitude]
+      [latitude, longitude, emergency_type]
     );
 
     const responseData = {
       first_aid_guidance: firstAid,
-      severity: severity
+      severity: severity,
+      incident: incident.rows[0]
     };
 
     if (responder.rows.length === 0) {
-      responseData.message = 'Incident created but no responders available right now';
-      responseData.incident = incident.rows[0];
+      responseData.message = 'Incident created but no specialized responders available right now';
       return res.status(201).json(responseData);
     }
 
     const assignedResponder = responder.rows[0];
 
-    // Assign responder to incident
+    // Update incident with responder
     const updatedIncident = await db.query(
       `UPDATE incidents SET responder_id = $1, status = 'assigned'
        WHERE id = $2 RETURNING *`,
@@ -57,16 +59,118 @@ const createIncident = async (req, res) => {
       [assignedResponder.id]
     );
 
-    responseData.message = 'Incident created and responder assigned';
+    // Get user info for the alert
+    const userInfo = await db.query(
+      `SELECT full_name, phone, blood_type, allergies, medical_conditions FROM users WHERE id = $1`,
+      [user_id]
+    );
+
+    // Send real-time alert to responder via Socket.io
+    const { io } = require('../index');
+    io.to(`responder_${assignedResponder.user_id}`).emit('new_incident_alert', {
+      incident: updatedIncident.rows[0],
+      user: userInfo.rows[0],
+      first_aid_guidance: firstAid,
+      severity: severity
+    });
+
+    responseData.message = 'Incident created and responder notified';
     responseData.incident = updatedIncident.rows[0];
     responseData.responder = {
       id: assignedResponder.id,
       full_name: assignedResponder.full_name,
       phone: assignedResponder.phone,
-      responder_type: assignedResponder.responder_type
+      responder_type: assignedResponder.specialization
     };
 
     res.status(201).json(responseData);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+};
+
+// PUSH INCIDENT TO NEXT RESPONDER
+const pushIncidentToNext = async (req, res) => {
+  const { id } = req.params;
+
+  try {
+    // Get current incident
+    const incident = await db.query(
+      `SELECT * FROM incidents WHERE id = $1`,
+      [id]
+    );
+
+    if (incident.rows.length === 0) {
+      return res.status(404).json({ error: 'Incident not found' });
+    }
+
+    const currentIncident = incident.rows[0];
+    const currentResponderId = currentIncident.responder_id;
+
+    // Free up current responder
+    if (currentResponderId) {
+      await db.query(
+        `UPDATE responders SET is_available = true WHERE id = $1`,
+        [currentResponderId]
+      );
+    }
+
+    // Find next nearest available specialized responder (excluding current)
+    const nextResponder = await db.query(
+      `SELECT r.*, u.full_name, u.phone, u.id as user_id FROM responders r
+       JOIN users u ON r.user_id = u.id
+       WHERE r.is_available = true
+       AND r.is_verified = true
+       AND r.specialization = $3
+       AND r.id != $4
+       ORDER BY (
+         (r.latitude - $1)^2 + (r.longitude - $2)^2
+       ) ASC LIMIT 1`,
+      [currentIncident.latitude, currentIncident.longitude, currentIncident.emergency_type, currentResponderId]
+    );
+
+    if (nextResponder.rows.length === 0) {
+      return res.status(200).json({ message: 'No other responders available right now' });
+    }
+
+    const assignedResponder = nextResponder.rows[0];
+
+    // Update incident with new responder
+    const updatedIncident = await db.query(
+      `UPDATE incidents SET responder_id = $1, status = 'assigned'
+       WHERE id = $2 RETURNING *`,
+      [assignedResponder.id, id]
+    );
+
+    // Mark new responder as unavailable
+    await db.query(
+      `UPDATE responders SET is_available = false WHERE id = $1`,
+      [assignedResponder.id]
+    );
+
+    // Get user info
+    const userInfo = await db.query(
+      `SELECT full_name, phone, blood_type, allergies, medical_conditions FROM users WHERE id = $1`,
+      [currentIncident.user_id]
+    );
+
+    // Send real-time alert to new responder
+    const { io } = require('../index');
+    io.to(`responder_${assignedResponder.user_id}`).emit('new_incident_alert', {
+      incident: updatedIncident.rows[0],
+      user: userInfo.rows[0]
+    });
+
+    res.json({
+      message: 'Incident pushed to next responder',
+      incident: updatedIncident.rows[0],
+      responder: {
+        id: assignedResponder.id,
+        full_name: assignedResponder.full_name,
+        phone: assignedResponder.phone,
+        responder_type: assignedResponder.specialization
+      }
+    });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -104,6 +208,10 @@ const updateIncidentStatus = async (req, res) => {
         );
       }
     }
+
+    // Send real-time status update
+    const { io } = require('../index');
+    io.to(id).emit('incident_status', { status });
 
     res.json({ message: 'Incident status updated', incident: result.rows[0] });
   } catch (error) {
@@ -162,10 +270,42 @@ const getIncident = async (req, res) => {
   }
 };
 
+// GET RESPONDER'S ASSIGNED INCIDENTS
+const getResponderIncidents = async (req, res) => {
+  const user_id = req.user.id;
+  try {
+    const responder = await db.query(
+      `SELECT id FROM responders WHERE user_id = $1`,
+      [user_id]
+    );
+
+    if (responder.rows.length === 0) {
+      return res.status(404).json({ error: 'Responder profile not found' });
+    }
+
+    const responder_id = responder.rows[0].id;
+
+    const result = await db.query(
+      `SELECT i.*, u.full_name as user_name, u.phone as user_phone
+       FROM incidents i
+       JOIN users u ON i.user_id = u.id
+       WHERE i.responder_id = $1
+       ORDER BY i.created_at DESC`,
+      [responder_id]
+    );
+
+    res.json({ incidents: result.rows });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+};
+
 module.exports = {
   createIncident,
+  pushIncidentToNext,
   updateIncidentStatus,
   getAllIncidents,
   getUserIncidents,
-  getIncident
+  getIncident,
+  getResponderIncidents
 };
