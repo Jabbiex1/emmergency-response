@@ -8,6 +8,7 @@ require('dotenv').config();
 const authRoutes = require('./routes/auth');
 const incidentRoutes = require('./routes/incidents');
 const responderRoutes = require('./routes/responders');
+const ussdRoutes = require('./routes/ussd');
 
 const app = express();
 const server = http.createServer(app);
@@ -20,6 +21,7 @@ const io = new Server(server, {
 
 app.use(cors());
 app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
 const PORT = process.env.PORT || 5000;
 
@@ -27,6 +29,7 @@ const PORT = process.env.PORT || 5000;
 app.use('/api/auth', authRoutes);
 app.use('/api/incidents', incidentRoutes);
 app.use('/api/responders', responderRoutes);
+app.use('/api/ussd', ussdRoutes);
 
 // Test route
 app.get('/', (req, res) => {
