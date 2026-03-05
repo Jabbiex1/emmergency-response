@@ -7,6 +7,7 @@ require('dotenv').config();
 
 const authRoutes = require('./routes/auth');
 const incidentRoutes = require('./routes/incidents');
+const responderRoutes = require('./routes/responders');
 
 const app = express();
 const server = http.createServer(app);
@@ -25,6 +26,7 @@ const PORT = process.env.PORT || 5000;
 // Routes
 app.use('/api/auth', authRoutes);
 app.use('/api/incidents', incidentRoutes);
+app.use('/api/responders', responderRoutes);
 
 // Test route
 app.get('/', (req, res) => {
